@@ -829,15 +829,15 @@ b {
               <span class=rotaryTable>
                 <div class=rotaryTableRow>
                   <div class=rotaryTableCell>
-                    <span class=rotaryLed id=s20></span>USER D
+                    <span class=rotaryLed id=s17></span>USER D
                   </div>
                   <div class=rotaryTableCell>
-                    <span class=rotaryLed id=s21></span>USER I
+                    <span class=rotaryLed id=s18></span>USER I
                   </div>
                 </div>
                 <div class=rotaryTableRow>
                   <div class=rotaryTableCell>
-                    <span class=rotaryLed id=s18></span>SUPER D
+                    <span class=rotaryLed id=s16></span>SUPER D
                   </div>
                   <div class=rotaryTableCell>
                     <span class=rotaryLed id=s19></span>SUPER I
@@ -845,10 +845,10 @@ b {
                 </div>
                 <div class=rotaryTableRow>
                   <div class=rotaryTableCell>
-                    <span class=rotaryLed id=s16></span>KERNEL D
+                    <span class=rotaryLed id=s15></span>KERNEL D
                   </div>
                   <div class=rotaryTableCell>
-                    <span class=rotaryLed id=s17></span>KERNEL I
+                    <span class=rotaryLed id=s20></span>KERNEL I
                   </div>
                 </div>
                 <div class=rotaryTableRow>
@@ -856,7 +856,7 @@ b {
                     <div class=rotaryLed id=s14></div>CONS PHY
                   </div>
                   <div class=rotaryTableCell>
-                    <div class=rotaryLed id=s15></div>PROG PHY
+                    <div class=rotaryLed id=s21></div>PROG PHY
                   </div>
                 </div>
               </span>
@@ -879,10 +879,10 @@ b {
                 </div>
                 <div class=rotaryTableRow>
                   <div class=rotaryTableCell>
-                    <span class=rotaryLed id=s24></span>BUS REG
+                    <span class=rotaryLed id=s25></span>BUS REG
                   </div>
                   <div class=rotaryTableCell>
-                    <span class=rotaryLed id=s25></span>DISPLAY<br>REGISTER
+                    <span class=rotaryLed id=s24></span>DISPLAY<br>REGISTER
                   </div>
                 </div>
               </span>
@@ -971,26 +971,15 @@ b {
     </div>
   </div>
 </div>
-<p class=clear>console<br>
-  <textarea autofocus id=0 cols=132 rows=24 style="font-family:'Courier New',Courier,'Lucida Console',Monaco,monospace;" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+<p class=clear><br>
+  <div id="tty0_div"></div>   <!-- Console -->
   <br>
-  <button onclick="vt52Input(vt52LastUnit,String.fromCharCode(3))">Ctrl/C</button>
-  <button onclick="vt52Input(vt52LastUnit,String.fromCharCode(4))">Ctrl/D</button>
-  <button onclick="vt52Input(vt52LastUnit,String.fromCharCode(8))">Ctrl/H</button>
-  <button onclick="vt52Input(vt52LastUnit,String.fromCharCode(10))">LF</button>
-  <button onclick="vt52Input(vt52LastUnit,String.fromCharCode(17))">Ctrl/Q</button>
-  <button onclick="vt52Input(vt52LastUnit,String.fromCharCode(19))">Ctrl/S</button>
-  <button onclick="vt52Input(vt52LastUnit,String.fromCharCode(20))">Ctrl/T</button>
-  <button onclick="vt52Input(vt52LastUnit,String.fromCharCode(26))">Ctrl/Z</button>
-  <button onclick="vt52Input(vt52LastUnit,String.fromCharCode(27))">ESC</button>
-  <button onclick="vt52Input(vt52LastUnit,String.fromCharCode(9))">TAB</button>
-  <button onclick="vt52Input(vt52LastUnit,String.fromCharCode(0))">Break</button>
-  <button onclick="vt52Put(0,10);boot();">REBOOT</button>
+  <button onclick="vt52Write(0,10);boot();">REBOOT</button>
 </p>
 <p>
   <label>Paper tape reader file</label>
   <select id="ptr">
-    <option value="">none</option>
+    <option value="">--none--</option>
     <option value="DEC-11-AJPB-PB">BASIC-11 V007A</option>
     <option value="DEC-11-O2PA-PB">ODT-11X-V004A</option>
     <option value="ED-11-V004B-8K">ED-11-V004B</option>
@@ -998,113 +987,136 @@ b {
     <option value="bootcode">Bootcode</option>
   </select>
 </p>
-<br>
+<p>
+  <label>Download disk</label>
+  <select id="downLoadSelect" disabled>
+	<option value="">--none--</option>
+  </select>
+</p>
+<p>
 <div id="vt11"></div>
-<br>
+</p>
+<bp>
 <div id="vg11"></div>
+</p>
+<div id="tty1_div"></div>   <!-- TTY1 -->
+<div id="tty2_div"></div>   <!-- TTY2 -->
+<!-- Add more if needed -->
+<div id="lp11_div"></div>
 <br>
-<div id="dl11"></div>
-<div id="lp11"></div>
-<br>
-<h3>PDP 11/70 Emulator</h3>
-    <p>
-      This emulator came about because years ago I was a programmer for RSTS/E on a PDP 11/45 and had admired the console idle loop light pattern - but I couldn't quite remember how it looked. Given the unavailability of real systems it became time to write an emulator!
-    </p>
-    <p>
-      I was going to start with a PDP 11/45 emulator but the extra memory of a PDP 11/70 became far too attractive (nearly a whole 4MB!). I eventually wrote a
-      <a href="https://paulnank.github.io/pdp11-js/pdp11.html">PDP 11/70</a> version as well as a
-      <a href="https://paulnank.github.io/pdp11-js/pdp11-45.html">PDP 11/45</a> version, and later also a
-      <a href='https://skn.noip.me/pdp10/pdp10.html'>PDP-10</a>.
-    </p>
-    <p>
-      I met my core objective - I can now see the RSTS/E console light pattern that I was looking for, and found that newer versions (eg v9.6) have a different light pattern. Also I have now seen some of the light patterns for other OSes. RSX and BSD 2.11
-      have their own different patterns, and Unix V5 and Ultrix operate with absolute minimum light movement (I'm assuming they operate mostly in WAIT mode).
-    </p>
-    <p>
-      Getting all of the operating systems used here presents its own set of challenges - one of which is finding the software in the first place. But one of the most interesting was RSTS/E V06C which has its own
-      <a href='https://paulnank.github.io/pdp11-js/RSTSv06c.html'>story</a>.
-    </p>
-    <p>
-      Many of the systems also include source in some form or another and it is very interesting to see the different approaches they used. All had a profound influence on systems which evolved later and unix in particular would be familiar to administrators of current systems. I reflect that if I had been exposed to Ultrix earlier I might have chosen a different career path.
-    <p>
-      The boot code in this emulator is a custom PDP 11 program running with it's own set of light patterns. It is initially loaded at address 120000 and includes a LIGHTS command which operates by mapping and executing a WAIT instruction from a pattern of virtual addresses. The resulting display simply shows the content of R0 and the address of the instruction being executed. You can also use the BOOT command to start one of the guest operating systems listed below, or the ODT command to start a version of the Octal Debugging Tool.
-    </p>
-    <p>
-      However boot code like this was not part of early PDP 11s. These systems had no BIOS or other software to help get the bare metal started. If you were lucky perhaps the previous boot code would still be intact in non-volatile magnetic core memory, but in general booting the system required toggling in a small bootstrap loader from the front panel.
-    </p>
-    <p>
-      Here is an example of the switch commands for booting from an RK05 where the value at address 1002 selects the unit number (rk0, rk1, rk2, etc). Goodluck!
-    </p>
+<h2>PDP‑11/70 Emulator</h2>
+
+<p>
+  This emulator began as a personal project. Years ago I was a programmer on RSTS/E running on a PDP‑11/45, and I vividly remembered the console’s idle loop light pattern — but not quite how it looked. With real hardware long gone, I decided to recreate it in software.
+</p>
+
+<p>
+  My initial plan was to emulate the PDP‑11/45, but the expanded memory of the PDP‑11/70 (nearly 4 MB!) proved irresistible. The result was a
+  <a href="https://paulnank.github.io/pdp11-js/pdp11.html">PDP‑11/70 emulator</a>, later joined by a
+  <a href="https://paulnank.github.io/pdp11-js/pdp11-45.html">PDP‑11/45</a> version and even a
+  <a href="https://skn.noip.me/pdp10/pdp10.html">PDP‑10</a>.
+</p>
+
+<p>
+  The core objective was met: I can now see the RSTS/E console light pattern again. Interestingly, later releases (such as v9.6) changed the pattern, and other operating systems have their own distinctive styles. RSX and BSD 2.11 show lively variations, while Unix V5 and Ultrix keep the lights almost static, reflecting heavy use of WAIT mode.
+</p>
+
+<p>
+  Collecting the operating systems themselves was a challenge. One highlight was tracking down RSTS/E V06C, which has its own
+  <a href="https://paulnank.github.io/pdp11-js/RSTSv06c.html">story</a>.
+</p>
+
+<p>
+  Many of these systems include source code, offering fascinating insights into their design. Their influence on later computing is profound — Unix in particular feels familiar to modern administrators. I sometimes wonder if encountering Ultrix earlier might have steered my career differently.
+</p>
+
+<p>
+  The emulator boots with a custom PDP‑11 program that drives its own light patterns. Loaded at address <code>120000</code>, it includes a <b>LIGHTS</b> command that cycles through virtual addresses with WAIT instructions, displaying the contents of R0 and the current instruction address. You can also use <b>BOOT</b> to start guest operating systems, or <b>ODT</b> to launch the Octal Debugging Tool.
+</p>
+
+<p>
+  Original PDP‑11s had no BIOS. Booting meant toggling in a tiny bootstrap loader from the front panel — unless you were lucky enough to have residual code in magnetic core memory. Below is an example bootstrap for the RK05 disk, where the value at address <code>1002</code> selects the unit (rk0, rk1, rk2, etc.).
+</p>
+
 <pre>
-<b>
-Address Data    Code           Switch commands
-</b>
+<b>Address  Data    Code           Switch commands</b>
                                HALT, 001000, LOAD ADDRESS
-001000  012737  mov #unit,rkda 012737, DEPOSIT
-001002  000000                 000000, DEPOSIT or 020000 for rk1, 040000 for rk2, etc
-001004  177412                 177412, DEPOSIT
-001006  012700  mov #rkwc, r0  012700, DEPOSIT
-001010  177406                 177406, DEPOSIT
-001012  012710  mov #-256,(r0) 012710, DEPOSIT
-001014  177400                 177400, DEPOSIT
-001016  012740  mov #5,-(r0)   012740, DEPOSIT
-001020  000005                 000005, DEPOSIT
-001022  105710  tstb (r0)      105710, DEPOSIT
-001024  100376  bpl .-2        100376, DEPOSIT
-001026  005007  clr pc         005007, DEPOSIT
+001000   012737  mov #unit,rkda 012737, DEPOSIT
+001002   000000                 000000, DEPOSIT (020000 for rk1, 040000 for rk2, etc)
+001004   177412                 177412, DEPOSIT
+001006   012700  mov #rkwc,r0   012700, DEPOSIT
+001010   177406                 177406, DEPOSIT
+001012   012710  mov #-256,(r0) 012710, DEPOSIT
+001014   177400                 177400, DEPOSIT
+001016   012740  mov #5,-(r0)   012740, DEPOSIT
+001020   000005                 000005, DEPOSIT
+001022   105710  tstb (r0)      105710, DEPOSIT
+001024   100376  bpl .-2        100376, DEPOSIT
+001026   005007  clr pc         005007, DEPOSIT
                                001000, LOAD ADDRESS, ENABLE, START
 </pre>
-    <p>
-      If you wish to toggle in a simple light chaser to the front panel then here are some switch commands which can be used:
-    </p>
+
+<p>
+  For fun, here’s a simple “light chaser” program you can toggle in:
+</p>
+
 <pre>
-<b>
-Address Data    Code        Switch commands
-</b>
+<b>Address  Data    Code        Switch commands</b>
                             HALT, 001000, LOAD ADDRESS
-001000  012700  mov #1,r0   012700, DEPOSIT
-001002  000001              000001, DEPOSIT
-001004  006100  rol r0      006100, DEPOSIT
-001006  000005  reset       000005, DEPOSIT
-001010  000775  br .-4      000775, DEPOSIT
+001000   012700  mov #1,r0   012700, DEPOSIT
+001002   000001              000001, DEPOSIT
+001004   006100  rol r0      006100, DEPOSIT
+001006   000005  reset       000005, DEPOSIT
+001010   000775  br .-4      000775, DEPOSIT
                             001000, LOAD ADDRESS, ENABLE, START
 </pre>
-To restart the initial boot code (if it has not been overwritten) use the switch commands:
+
+<p>
+  To restart the emulator’s initial boot code (if not overwritten), use:
+</p>
+
 <pre>
 HALT, 120000, LOAD ADDRESS, ENABLE, START
 </pre>
-    <p>
-      If you are interested in how the emulator works then you can browse the source files on
-      <b><a href='https://github.com/paulnank/pdp11-js/'>Github</a></b>.
-      The main Javascript files are pdp11.js, fpp.js and iopage.js
-    </p>
-    <p>
-      Happy emulating!
-    </p>
-    <p>
-      Paul Nankervis
-    </p>
-<h3>List of guest OS's:</h3>
-<table style="margin-left:25px" padding=3>
-    <thead><tr><td>DISK</td><td>OS</td><td>Notes</td></tr></thead>
-    <tbody>
-        <tr><td class=disk>RK0</td><td class=system>Unix V5</td><td>Boot using: unix then login as root</td></tr>
-        <tr><td class=disk>RK1</td><td class=system>RT11 v4.0</td><td>The smallest OS here</td></tr>
-        <tr><td class=disk>RK2</td><td class=system>RSTS V06C-03</td><td>Boot and login as 1,2 with password SYSTEM or as 11,70 using PDP</td></tr>
-        <tr><td class=disk>RK3</td><td class=system>XXDP</td><td>Diagnostic OS and utilities</td></tr>
-        <tr><td class=disk>RK4</td><td class=system>RT-11 3B</td><td>Distribution for RT-11 Version 3B</td></tr>
-        <tr><td class=disk>TM0</td><td class=system>RSTS 4B-17</td><td>Boot ROLLIN from TM0 and restore DK0 with "DK:&lt;MT:VIXEN/REW". Reboot from DK0 with "/BO:DK" to auto-login as 1,2 (password is SYSTEM ) Relogin as 11,70 with password PDP Commands are case sensitive.</td></tr>
-        <tr><td class=disk>RL0</td><td class=system>BSD 2.9</td><td>Boot using: rl(0,0)rlunix   CTRL/D to exit single user and start multiuser - login as root (no password)</td></tr>
-        <tr><td class=disk>RL1</td><td class=system>RSX 11M v3.2</td><td>Login as 1,2 with password SYSTEM</td></tr>
-        <tr><td class=disk>RL2</td><td class=system>RSTS/E v7.0</td><td>Option: &lt;LF&gt; Suboption: &lt;LF&gt; ... Login as 1,2 using SYSTEM or 11,70 using PDP</td></tr>
-        <tr><td class=disk>RL3</td><td class=system>XXDP</td><td>Larger version of diagnostics - including PDP 11/70 utilities</td></tr>
-        <tr><td class=disk>RP0</td><td class=system>ULTRIX-11 V3.1</td><td> CTRL/D to enter multiuser mode. Login as root with no password</td></tr>
-        <tr><td class=disk>RP1</td><td class=system>BSD 2.11</td><td>Will autoboot and enter multiuser mode. Login as root with no password</td></tr>
-        <tr><td class=disk>RP2</td><td class=system>RSTS/E v9.6</td><td>Answer boot questions and login as 1,2 (password SYSTEM ) or 11,70 (no password)</td></tr>
-        <tr><td class=disk>RP3</td><td class=system>RSX 11M v4.6</td><td>Starts logged in as 1,2 (password SYSTEM ) - user accounts 200,1 (no password) or 11,70 (password PDP )</td></tr>
-        <tr><td class=disk>RP4</td><td class=system>RSTS/E v10.1</td><td>Answer boot questions and login as 1,2 (password SYSTEM ) or 11,70 (no password)</td></tr>
-    </tbody>
+
+<p>
+  Curious how it all works? The source is available on
+  <a href="https://github.com/paulnank/pdp11-js/">GitHub</a>. The main JavaScript files are <code>pdp11.js</code>, <code>fpp.js</code>, and <code>iopage.js</code>.
+</p>
+
+<p><b>Happy emulating!</b></p>
+<p><i>Paul Nankervis</i></p>
+
+<h3>Guest Operating Systems</h3>
+
+<table style="margin-left:25px; padding:3px;">
+  <thead>
+    <tr>
+      <th>Disk</th>
+      <th>OS</th>
+      <th>Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td class="disk">RK0</td><td class="system">Unix V5</td><td>Boot using: <code>unix</code>, then login as root</td></tr>
+    <tr><td class="disk">RK1</td><td class="system">RT‑11 v4.0</td><td>The smallest OS here</td></tr>
+    <tr><td class="disk">RK2</td><td class="system">RSTS V06C‑03</td><td>Login as 1,2 (password SYSTEM) or 11,70 (password PDP)</td></tr>
+    <tr><td class="disk">RK3</td><td class="system">XXDP</td><td>Diagnostic OS and utilities</td></tr>
+    <tr><td class="disk">RK4</td><td class="system">RT‑11 3B</td><td>Distribution for RT‑11 Version 3B</td></tr>
+    <tr><td class="disk">TM0</td><td class="system">RSTS 4B‑17</td><td>Boot ROLLIN from TM0, restore DK0, then reboot. Default login 1,2 (SYSTEM) or 11,70 (PDP).</td></tr>
+    <tr><td class="disk">RL0</td><td class="system">BSD 2.9</td><td>Boot using: <code>rl(0,0)rlunix</code>. CTRL/D to enter multiuser. Login as root.</td></tr>
+    <tr><td class="disk">RL1</td><td class="system">RSX 11M v3.2</td><td>Login as 1,2 (SYSTEM)</td></tr>
+    <tr><td class="disk">RL2</td><td class="system">RSTS/E v7.0</td><td>Login as 1,2 (SYSTEM) or 11,70 (PDP)</td></tr>
+    <tr><td class="disk">RL3</td><td class="system">XXDP</td><td>Larger diagnostics, including PDP‑11/70 utilities</td></tr>
+    <tr><td class="disk">RP0</td><td class="system">ULTRIX‑11 V3.1</td><td>CTRL/D to enter multiuser mode. Login as root (no password)</td></tr>
+    <tr><td class="disk">RP1</td><td class="system">BSD 2.11</td><td>Autoboots into multiuser. Login as root (no password)</td></tr>
+    <tr><td class="disk">RP2</td><td class="system">RSTS/E v9.6</td><td>Answer boot questions and login as 1,2 (SYSTEM) or 11,70 (no password)</td></tr>
+    <tr><td class="disk">RP3</td><td class="system">RSX 11M v4.6</td><td>Starts logged in as 1,2 (SYSTEM). Other accounts: 200,1 (no password), 11,70 (PDP).</td></tr>
+    <tr><td class="disk">RP4</td><td class="system">RSTS/E v10.1</td><td>Answer boot questions and login as 1,2 (SYSTEM) or 11,70 (no password)</td></tr>
+  </tbody>
 </table>
+	
+	
 <h3>Example boot of Unix V5</h3>
 <pre>
 Boot&gt; <b>boot rk0</b>
@@ -2863,13 +2875,13 @@ function examineDeposit(data) {
     }
     trapState = CPU.trapPSW;
     CPU.trapPSW = -2; // Disable trap handling
-    if (panel.rotary0 > 1) { // If a virtual address is selected...
+    if (panel.rotary0 >= 1 && panel.rotary0 <= 6) { // If a virtual address is selected...
         if (panel.autoIncr & autoMask) {
             CPU.displayAddress += 2; // auto increment if applicable
         }
         CPU.displayAddress &= 0xffff;
-        CPU.displayAddress |= [0, 0, 0x10000, 0, 0x10000, 0, 0x10000, 0][panel.rotary0];
-        CPU.mmuMode = [0, 0, 0, 0, 1, 1, 3, 3][panel.rotary0];
+        CPU.displayAddress |= [0, 0, 0, 0, 0x10000, 0x10000, 0x10000, 0][panel.rotary0];
+        CPU.mmuMode = [0, 0, 1, 3, 3, 1, 0, 0][panel.rotary0];
         if (data < 0) { // examine (read)
             result = readWordByVirtual(CPU.displayAddress);
         } else { // deposit (write)

@@ -8,95 +8,145 @@
 // This code emulates the function of a PDP 11/70 CPU.
 //
 //
+
+// I/O Base Addresses
+const IOBASE_VIRT    = 0o160000;
+const IOBASE_18BIT   = 0o760000;
+const IOBASE_UNIBUS  = 0o17000000;
+const IOBASE_22BIT   = 0o17760000;
+const MAX_MEMORY     = IOBASE_UNIBUS - 16384; // BSD 2.9 boot requires less memory
+
+// MMU Flags
+const MMU_READ          = 16;  // Access type: read
+const MMU_WRITE         = 32;  // Access type: write
+const MMU_LENGTH_MASK   = 0xf; // Operand length mask
+const MMU_LENGTH_EVEN   = 0xe; // SP operand length (must be even)
+const MMU_BYTE          = 1;   // Byte length
+const MMU_WORD          = 2;   // Word length
+
+// MMU Combined Flags
+const MMU_BYTE_READ     = MMU_READ | MMU_BYTE;
+const MMU_WORD_READ     = MMU_READ | MMU_WORD;
+const MMU_BYTE_WRITE    = MMU_WRITE | MMU_BYTE;
+const MMU_WORD_WRITE    = MMU_WRITE | MMU_WORD;
+const MMU_BYTE_MODIFY   = MMU_READ | MMU_WRITE | MMU_BYTE;
+const MMU_WORD_MODIFY   = MMU_READ | MMU_WRITE | MMU_WORD;
+
+// CPU States
+const CPU_STATE = {
+  RUN:   0,
+  RESET: 1,
+  WAIT:  2,
+  HALT:  3,
+  STEP:  4
+};
+
 const
-    IOBASE_VIRT = 0o160000,
-    IOBASE_18BIT = 0o760000,
-    IOBASE_UNIBUS = 0o17000000,
-    IOBASE_22BIT = 0o17760000,
-    MAX_MEMORY = IOBASE_UNIBUS - 16384, // Maximum memory address (need less memory for BSD 2.9 boot)
-    MMU_READ = 16, // READ & WRITE bits used to indicate access type in memory operations
-    MMU_WRITE = 32, // but beware lower 4 bits used as auto-increment length when getting virtual address
-    MMU_LENGTH_MASK = 0xf, // Mask for operand length (which can be up to 8 for FPP)
-    MMU_LENGTH_EVEN = 0xe, // Mask for SP operand length (must be even)
-    MMU_BYTE = 1, // Byte length in 4 bits - also used as byte test mask
-    MMU_WORD = 2, // Word length
-    MMU_BYTE_READ = MMU_READ | MMU_BYTE, // Read flag with byte length
-    MMU_WORD_READ = MMU_READ | MMU_WORD,
-    MMU_BYTE_WRITE = MMU_WRITE | MMU_BYTE,
-    MMU_WORD_WRITE = MMU_WRITE | MMU_WORD,
-    MMU_BYTE_MODIFY = MMU_READ | MMU_WRITE | MMU_BYTE,
-    MMU_WORD_MODIFY = MMU_READ | MMU_WRITE | MMU_WORD, // Read & write flags with word length
     STATE_RUN = 0, // Define legal values for CPU.runState (run, reset, wait, halt)
     STATE_RESET = 1,
     STATE_WAIT = 2,
     STATE_HALT = 3,
     STATE_STEP = 4;
+	
+// PSW definitions
+const PSW_ADDRESS          = 0o17777776;
+const PSW_REGISTER_SET_BIT = 0x0800;
+const PSW_MODE_BITS        = 0xc000;
+const PSW_PRIORITY_MASK    = 0xe0;
+const PSW_CLEAR_FLAGS_MASK = 0xf8ff;
+const PSW_FLAG_N = 0x8;
+const PSW_FLAG_Z = 0x4;
+const PSW_FLAG_V = 0x2;
+const PSW_FLAG_C = 0x1;
 
 
-// Below are the CPU registers. At simplest level a PDP 11 program has 8 registers (0-5 are general, 6 is the stack
-// pointer, and 7 is the PC), 4 condition codes (Negative, Zero, Overflow and Carry), up to 28K words of memory,
-// and 4K of I/O page address space. All device I/O and access to other features (including memory management)
-// is done through reference to the I/O page at the top of physical memory.
-// Memory management enables 3 modes (Kernel, Supervisor and User) each of which have their own mapping of memory
-// from a 17 bit virtual address (16 bits for instruction and 16 for data), to 22 bits of physical bus space.
-// Thus a program virtual address space can be up to 32K words of instruction space and 32K words of data space.
-// The distinction between these spaces is that references based on register 7 (the program counter) refer to
-// instruction space, while all other references are to data space.
-// I/O and control of devices is done by writing to device registers in the I/O page at the top 4K of
-// physical memory. That is implemented here by calling the iopage.access() function in module iopage.js.
-// For example to send a character to the console terminal a program would write to the console transmit buffer at
-// virtual address 177566 - assuming that this is mapped to physical address 17777566. Also located in the I/O page
-// are things like the Program Status Word (PSW which contains CPU priority, memory management mode, condition
-// codes etc), Memory Management registers, the Stack limit register, Program Interrupt register, each memory
-// management mode stack pointer (R6), as well as two sets of general registers (selection by program status).
-// Floating point arithmetic is handled by a separate module. It is implemented by calling the executeFPP()
-// function in module fpp.js whenever a floating point instruction is encountered.
-// Traps are implemented by the trap() function below. Traps read a new PC and PSW from a vector in kernel data
-// space, and then save the old values on to the new mode stack. Software can resume processing at the end of an
-// interrupt service routine by using an RTT or RTI instruction to restore the PC and PSW.
-// The trap vector depends on the kind of trap, for example 4 for an odd address, 10 for an invalid instruction,
-// or 20 when an IOT instruction is encountered.
-// I/O traps occur when a device needs to signal attention, for example at the completion of an operation. Device
-// interrupts are handled in the iopage module which flags when interrupt priorities need to be re-examined, by
-// setting the interruptRequested flag to indicate that a call back to iopage.poll() is required.
+// === PDP‑11 CPU Overview ===
+//
+// • Registers:
+//   – 8 general registers: R0–R5 (general purpose), R6 (stack pointer), R7 (program counter).
+//   – 4 condition codes: Negative (N), Zero (Z), Overflow (V), Carry (C).
+//
+// • Memory:
+//   – Up to 28K words of main memory.
+//   – Top 4K of physical memory reserved as the I/O page.
+//   – Device I/O and system features (including memory management) are accessed via this I/O page.
+//
+// • Memory Management:
+//   – Supports 3 virtual modes: Kernel, Supervisor, User.
+//   – Maps 17‑bit virtual addresses (separate 16‑bit instruction and 16‑bit data spaces)
+//     into 22‑bit physical bus addresses.
+//   – Each program can address up to 32K words of instruction space and 32K words of data space.
+//   – References via R7 (PC) use instruction space; all other accesses use data space.
+//
+// • I/O Page Contents:
+//   – Device registers (e.g. console transmit buffer at virtual 177566 → physical 17777566).
+//   – Program Status Word (PSW: priority, mode, condition codes).
+//   – Memory management registers, stack limit register, program interrupt register.
+//   – Separate stack pointers (R6) for each mode.
+//   – Two sets of general registers, selectable via PSW.
+//
+// • Floating Point:
+//   – Handled by a separate module.
+//   – Floating point instructions invoke `executeFPP()` in fpp.js.
+//
+// • Traps & Interrupts:
+//   – Implemented by `trap()`.
+//   – A trap loads new PC and PSW from a kernel vector, then pushes old values onto the mode stack.
+//   – Execution resumes via RTT/RTI instructions.
+//   – Trap vectors vary by cause (e.g. 4 = odd address, 10 = invalid instruction, 20 = IOT).
+//   – I/O traps occur when devices signal completion or attention.
+//   – Device interrupts are managed in iopage.js, which sets `interruptRequested` to trigger
+//     a priority check via `iopage.poll()`.
 
-var CPU = {
+const CPU = {
+    // --- Error & Status ---
     CPU_Error: 0,
-    MMR0: 0, // MMU control registers
+    runState: STATE_HALT,        // Current machine state (RUN, STEP, RESET, WAIT, HALT)
+    interruptRequested: 1,       // Flag to mark if an interrupt has been requested
+    trapMask: 0,                 // Mask of traps to be taken at the end of the current instruction
+    trapPSW: -1,                 // PSW when first trap invoked (for double trap handling)
+
+    // --- Processor Status Word & Flags ---
+    PSW: 0xf,                    // PSW (less flags C, N, V & Z)
+    flagC: NaN,                  // Carry bit (when not in PSW)
+    flagNZ: NaN,                 // Negative/Zero status (when not in PSW)
+    flagV: 0x8000,               // Overflow bit (when not in PSW)
+
+    // --- MMU Registers & State ---
+    MMR0: 0,                     // MMU control registers
     MMR1: 0,
     MMR2: 0,
     MMR3: 0,
-    PIR: 0, // Programmable interrupt register
-    PSW: 0xf, // PSW less flags C, N, V & Z
-    displayAddress: 0, // Address display for console operations
-    displayBusReg: 0, // Bus Register display (we don't really have one)
-    displayDataPaths: 0, // Console display data path (random except in console operations or non-run state)
-    displayMicroAdrs: 0, // Micro Address display (we don't really have one)
-    displayPhysical: 0, // Physical address display for console operations
-    displayRegister: 0, // Console display lights register (set by software)
-    flagC: NaN, //    PSW C bit (when not in PSW)
-    flagNZ: NaN, //   PSW NZ status (when not in PSW)
-    flagV: 0x8000, // PSW V bit (when not in PSW)
-    interruptRequested: 1, // flag to mark if an interrupt has been requested
-    memory: new Uint16Array(MAX_MEMORY >>> 1), // Main memory (in words - addresses must be halved for byte indexing)
-    mmuEnable: 0, // MMU enable mask for MMU_READ and/or MMU_WRITE
-    mmuLastPage: 0, // last used MMU page for MMR0 - 2 bits of mode and 4 bits of I/D page - used as an index into PAR/PDR
-    mmuMode: 0, // current memory management mode (0=kernel,1=super,2=undefined,3=user)
-    mmuPAR: new Uint16Array(64), //mmu par register by kernel (8 i and 8 d pages), super, illegal & user
-    mmuPDR: new Uint16Array(64), //mmu pdr register by kernel (8 i and 8 d pages), super, illegal & user
-    mmuPageMask: 0, // MMR3 I/D page mask
-    modifyAddress: 0, // Remember memory physical address
-    modifyRegister: -1, // Remember the address of a register in a read/write (modify) cycle
-    registerAlt: new Uint16Array(6), // Alternate registers R0 - R5
-    registerVal: new Uint16Array(8), // Current registers  R0 - R7
-    runState: STATE_HALT, // current machine state STATE_RUN, STATE_STEP, STATE_RESET, STATE_WAIT or STATE_HALT
-    stackLimit: 0xff, // stack overflow limit
-    stackPointer: new Uint16Array(4), // Alternate R6 (kernel, super, illegal, user)
-    statusLights: 0x3000, // Need to remember console address error light status
-    switchRegister: 0, // console switch register
-    trapMask: 0, // Mask of traps to be taken at the end of the current instruction
-    trapPSW: -1, // PSW when first trap invoked - for tackling double traps
-    unibusMap: new Uint32Array(32) // 32 double word unibus mapping registers
+    mmuEnable: 0,                // MMU enable mask for MMU_READ and/or MMU_WRITE
+    mmuLastPage: 0,              // Last used MMU page for MMR0
+    mmuMode: 0,                  // Current memory management mode (0=kernel,1=super,2=illegal,3=user)
+    mmuPageMask: 0x37,           // MMR3 I/D page mask
+    mmuPAR: new Uint16Array(64), // MMU PAR registers (kernel, super, illegal, user)
+    mmuPDR: new Uint16Array(64), // MMU PDR registers (kernel, super, illegal, user)
+	    // --- Memory ---
+    memory: new Uint16Array(MAX_MEMORY >>> 1), // Main memory (words; addresses halved for byte indexing)
+    unibusMap: new Uint32Array(32),            // 32 double-word unibus mapping registers
+    modifyAddress: 0,                          // Remember physical address in a modify cycle
+    modifyRegister: -1,                        // Remember register index in a modify cycle
+
+    // --- Registers ---
+    registerVal: new Uint16Array(8),           // Current registers R0–R7
+    registerAlt: new Uint16Array(6),           // Alternate registers R0–R5
+    stackPointer: new Uint16Array(4),          // Alternate R6 (kernel, super, illegal, user)
+    stackLimit: 0xff,                          // Stack overflow limit
+
+    // --- Interrupts ---
+    PIR: 0,                                    // Programmable interrupt register
+
+    // --- Console / Display ---
+    displayAddress: 0,                         // Address display for console operations
+    displayBusReg: 0,                          // Bus Register display (not implemented)
+    displayDataPaths: 0,                       // Console display data path
+    displayMicroAdrs: 0,                       // Micro Address display (not implemented)
+    displayPhysical: 0,                        // Physical address display for console operations
+    displayRegister: 0,                        // Console display lights register (set by software)
+    statusLights: 0x3000,                      // Console error/status lights
+    switchRegister: 0                          // Console switch register
 };
 
 // Instruction logging stuff - useful ONLY in browser debugging mode!!
@@ -211,194 +261,283 @@ function LOG_INSTRUCTION(instruction, name, format) {
     }
 }
 
+// setMMUmode() sets the new MMU CPU mode and associated page mask.
+
 function setMMUmode(mmuMode) {
     "use strict";
-    CPU.mmuPageMask = ((CPU.MMR3 << (mmuMode == 3 ? 3 : mmuMode + 1)) & 8) | (mmuMode << 4) | 0x7;
+	CPU.mmuPageMask = CPU.MMR3 & (mmuMode == 1 ? 2 : 4 - mmuMode) ? 0x3f : 0x37; // I/D mask
     CPU.mmuMode = mmuMode;
 }
 
-// writePSW() is used to update the CPU Processor Status Word. The PSW should generally
-// be written through this routine so that changes can be tracked properly, for example
-// the correct register set, the current memory management mode, etc. Note that for
-// performance reasons the N, Z, V, and C flags may be stored outside the PSW (CPU.PSW)
-// when CPU.flagNZ, CPU.flagV, and CPU.flagC contain a value other than NaN. Also
-// CPU.mmuMode mirrors the current processor mode in bits 14 & 15 of the PSW, except
-// when being manipulated by instructions which work across modes (MFPD, MFPI, MTPD,
-// MTPI, and function trap()).
+// === Processor Status Word (PSW) Handling ===
 //
-// CPU.PSW    15 14 13 12 11 10  9  8  7  6  5  4  3  2  1  0
-//              CM |  PM |RS|        |PRIORITY| T| N| Z| V| C
-// mode 0 kernel 1 super 2 illegal 3 user
+// • Purpose:
+//   The PSW holds the processor’s current state: mode, register set, priority,
+//   trace flag, and condition codes (N, Z, V, C).
+//   It should always be updated via writePSW() so that changes are tracked
+//   correctly (e.g. register set swaps, mode changes).
+//
+// • Performance Note:
+//   For efficiency, condition codes may be stored outside the PSW.
+//   – CPU.flagNZ, CPU.flagV, CPU.flagC hold temporary values when not NaN.
+//   – When these flags are external, PSW bits N/Z/V/C are reconstructed
+//     by readPSW().
+//
+// • Mode Mirroring:
+//   CPU.mmuMode mirrors the current processor mode (bits 14–15 of PSW).
+//   This is normally synchronized by writePSW(), except when instructions
+//   explicitly cross modes (MFPD, MFPI, MTPD, MTPI, or trap()).
+//
+// • PSW Bit Layout:
+//
+//   Bit:  15   14   13   12   11–8   7   6   5   4   3   2   1   0
+//         CM | PM | RS | Priority | T | N | Z | V | C
+//
+//   – CM (bits 15–14): Current mode
+//       0 = Kernel, 1 = Supervisor, 2 = Illegal, 3 = User
+//   – PM (bits 13–12): Previous mode
+//   – RS (bit 11): Register set select
+//   – Priority (bits 10–8): Interrupt priority level
+//   – T (bit 7): Trace flag
+//   – N/Z/V/C (bits 3–0): Condition codes
+
+// Update Processor Status Word (PSW)
 
 function writePSW(newPSW) {
     "use strict";
-    if ((newPSW ^ CPU.PSW) & 0x0800) { // register set change?
-        let i, temp;
-        for (i = 0; i <= 5; i++) {
-            temp = CPU.registerVal[i];
-            CPU.registerVal[i] = CPU.registerAlt[i];
-            CPU.registerAlt[i] = temp; // swap the active register sets
+    // Register set change?
+    if ((newPSW ^ CPU.PSW) & PSW_REGISTER_SET_BIT) {
+        for (let i = 0; i <= 5; i++) {
+            let temp = CPU.registerVal[i];
+			CPU.registerVal[i] = CPU.registerAlt[i];
+			CPU.registerAlt[i] = temp;
         }
     }
-    setMMUmode(newPSW >>> 14); // set mmuMode
-    if ((newPSW ^ CPU.PSW) & 0xc000) { // mode change?
+    // Update MMU mode
+    setMMUmode(newPSW >>> 14);
+    // Mode change?
+    if ((newPSW ^ CPU.PSW) & PSW_MODE_BITS) {
         CPU.stackPointer[CPU.PSW >>> 14] = CPU.registerVal[6];
-        CPU.registerVal[6] = CPU.stackPointer[newPSW >>> 14]; // swap to new mode SP
+        CPU.registerVal[6] = CPU.stackPointer[newPSW >>> 14];
     }
-    if ((newPSW & 0xe0) < (CPU.PSW & 0xe0)) { // priority lowered?
-        CPU.interruptRequested = 1; // trigger a check of priority levels
+    // Priority lowered?
+    if ((newPSW & PSW_PRIORITY_MASK) < (CPU.PSW & PSW_PRIORITY_MASK)) {
+        CPU.interruptRequested = 1;
     }
-    CPU.PSW = newPSW & 0xf8ff;
-    CPU.flagNZ = NaN; // NZV flags are inside the PSW
-    CPU.flagC = NaN; // C is also in the PSW
+    // Apply PSW and reset flags
+    CPU.PSW = newPSW & PSW_CLEAR_FLAGS_MASK;
+    CPU.flagNZ = NaN;
+    CPU.flagC = NaN;
 }
 
-function testN() { // Test N
+// === Condition Code Tests ===
+// These helpers check the current state of the condition codes.
+// If flags are stored externally (flagNZ/flagV/flagC not NaN),
+// use those values; otherwise fall back to PSW bits.
+
+function testN() {
     "use strict";
-    if (isNaN(CPU.flagNZ)) {
-        return CPU.PSW & 8;
-    } else {
-        return CPU.flagNZ & 0x8000;
-    }
+    // Negative flag
+    return isNaN(CPU.flagNZ)
+        ? (CPU.PSW & PSW_FLAG_N)
+        : (CPU.flagNZ & 0x8000);
 }
 
-function testZ() { // Test Z
+function testZ() {
     "use strict";
-    if (isNaN(CPU.flagNZ)) {
-        return CPU.PSW & 4;
-    } else {
-        return !(CPU.flagNZ & 0xffff);
-    }
+    // Zero flag
+    return isNaN(CPU.flagNZ)
+        ? (CPU.PSW & PSW_FLAG_Z)
+        : !(CPU.flagNZ & 0xffff);
 }
 
-function testV() { // Test V
+function testV() {
     "use strict";
-    if (isNaN(CPU.flagNZ)) {
-        return CPU.PSW & 2;
-    } else {
-        return CPU.flagV & 0x8000;
-    }
+    // Overflow flag
+    return isNaN(CPU.flagNZ)
+        ? (CPU.PSW & PSW_FLAG_V)
+        : (CPU.flagV & 0x8000);
 }
 
-function testC() { // Test C
+function testC() {
     "use strict";
-    if (isNaN(CPU.flagC)) {
-        return CPU.PSW & 1;
-    } else {
-        return CPU.flagC & 0x10000;
-    }
+    // Carry flag
+    return isNaN(CPU.flagC)
+        ? (CPU.PSW & PSW_FLAG_C)
+        : (CPU.flagC & 0x10000);
 }
 
-function testNxV() { // Test N xor V
+function testNxV() {
     "use strict";
-    if (isNaN(CPU.flagNZ)) {
-        return ((CPU.PSW >>> 2) ^ CPU.PSW) & 2; // N ^ V
-    } else {
-        return (CPU.flagNZ ^ CPU.flagV) & 0x8000;
-    }
+    // N xor V (used in signed comparisons)
+    return isNaN(CPU.flagNZ)
+        ? (((CPU.PSW >>> 2) ^ CPU.PSW) & PSW_FLAG_V)
+        : ((CPU.flagNZ ^ CPU.flagV) & 0x8000);
 }
 
-// readPSW() reassembles the  N, Z, V, and C flags back into the PSW (CPU.PSW)
+// === readPSW() ===
+// Purpose:
+//   Reconstructs the condition code flags (N, Z, V, C) into the Processor Status Word (CPU.PSW).
+//   This is required because, for performance reasons, flags may be stored externally
+//   in CPU.flagNZ, CPU.flagV, and CPU.flagC rather than directly in the PSW.
+//
+// Behavior:
+//   • Negative (N) and Zero (Z):
+//       - Derived from CPU.flagNZ.
+//       - If the low 16 bits are zero → set Z.
+//       - Otherwise, if the sign bit (0x8000) is set → set N.
+//   • Overflow (V):
+//       - Derived from CPU.flagV (bit 0x8000).
+//   • Carry (C):
+//       - If CPU.flagC is NaN → C is already inside PSW, preserve it.
+//       - If CPU.flagC is external → merge it into PSW, then clear CPU.flagC.
+//
+// After merging:
+//   • CPU.flagNZ and CPU.flagV are reset to NaN (flags now live inside PSW).
+//   • If CPU.flagC was external, it is also reset to NaN.
+//
+// Return:
+//   The updated CPU.PSW value with all condition codes correctly assembled.
 
 function readPSW() {
     "use strict";
     if (!isNaN(CPU.flagNZ)) {
         let flags = 0;
-        if (CPU.flagNZ & 0xffff) {
+        if (CPU.flagNZ & 0xffff) { // N/Z
             if (CPU.flagNZ & 0x8000) {
-                flags = 8;
-            }
+				flags = PSW_FLAG_N;
+			}
         } else {
-            flags = 4;
+            flags = PSW_FLAG_Z;
         }
-        if (CPU.flagV & 0x8000) {
-            flags |= 2;
-        }
-        CPU.flagNZ = NaN; // NZV flags are now inside the PSW
-        if (isNaN(CPU.flagC)) {
+        if (CPU.flagV & 0x8000) { // V
+			flags |= PSW_FLAG_V;
+		}
+        CPU.flagNZ = NaN; // NZV now inside PSW
+		if (isNaN(CPU.flagC)) { // C
             CPU.PSW = (CPU.PSW & 0xfff1) | flags;
         } else {
-            if (CPU.flagC & 0x10000) {
-                flags |= 1;
-            }
-            CPU.flagC = NaN; // C is also in the PSW
-            CPU.PSW = (CPU.PSW & 0xfff0) | flags;
+			if (CPU.flagC & 0x10000) {
+				flags |= PSW_FLAG_C;
+			}
+			CPU.flagC = NaN; // C now inside PSW
+			CPU.PSW = (CPU.PSW & 0xfff0) | flags;
         }
     }
     return CPU.PSW;
 }
 
-// All condition setting code abstracted from instruction routines to here
-// (to enable experimentation with other approaches).
+// === Condition Code Helpers ===
+// All condition setting logic is abstracted here, so instruction routines
+// can call these helpers directly. This enables experimentation with
+// alternate flag handling approaches without touching instruction code.
 
-function setFlags(mask, value) { // Set or clear selected flags in mask
+// Generic flag setter: apply mask/value directly to PSW
+function setFlags(mask, value) {
     "use strict";
-    mask &= 0xf;
+    mask &= 0xF;
     CPU.PSW = (readPSW() & ~mask) | (value & mask);
 }
 
-function setZero() { // Set flags for 0 value (Z becomes 1)
+// --- Zero flag helpers ---
+function setZero() {
     "use strict";
-    CPU.PSW = (CPU.PSW & 0xfff0) | 4;
-    CPU.flagNZ = NaN; // NZV flags are inside the PSW
-    CPU.flagC = NaN; // C is also in the PSW
+    // Set Z=1, clear N/V/C
+    CPU.PSW = (CPU.PSW & 0xFFF0) | PSW_FLAG_Z;
+    CPU.flagNZ = NaN; // NZV now inside PSW
+    CPU.flagC  = NaN; // C now inside PSW
 }
 
-function setNZ(result) { // Set N & Z clearing V (C unchanged)
+// --- Word operations ---
+function setNZ(result) {
     "use strict";
+    // Set N/Z, clear V, leave C unchanged
     CPU.flagNZ = result;
-    CPU.flagV = 0;
+    CPU.flagV  = 0;
 }
 
-function setNZV(result, flagV) { // Set N, Z & V (C unchanged)
+function setNZV(result, flagV) {
     "use strict";
+    // Set N/Z/V, leave C unchanged
     CPU.flagNZ = result;
-    CPU.flagV = flagV;
+    CPU.flagV  = flagV;
 }
 
-function setNZC(result) { // Set N, Z & C clearing V
+function setNZC(result) {
     "use strict";
+    // Set N/Z/C, clear V
     CPU.flagNZ = CPU.flagC = result;
-    CPU.flagV = 0;
+    CPU.flagV  = 0;
 }
 
-function setNZVC(result, flagV) { // Set all flag conditions
+function setNZVC(result, flagV) {
     "use strict";
-    CPU.flagNZ = CPU.flagC = result;
-    CPU.flagV = flagV;
+    // Set N/Z/C/V
+    CPU.flagNZ = CPU.flagC  = result;
+    CPU.flagV  = flagV;
 }
 
-function setByteNZ(result) { // Set N & Z clearing V (C unchanged) (byte)
+// --- Byte operations ---
+function setByteNZ(result) {
     "use strict";
+    // Set N/Z, clear V, leave C unchanged (byte)
     CPU.flagNZ = result << 8;
-    CPU.flagV = 0;
+    CPU.flagV  = 0;
 }
 
-function setByteNZV(result, flagV) { // Set N, Z & V (C unchanged) (byte)
+function setByteNZV(result, flagV) {
     "use strict";
+    // Set N/Z/V, leave C unchanged (byte)
     CPU.flagNZ = result << 8;
-    CPU.flagV = flagV << 8;
+    CPU.flagV  = flagV << 8;
 }
 
-function setByteNZC(result) { // Set N, Z & C clearing V (byte)
+function setByteNZC(result) {
     "use strict";
-    CPU.flagNZ = CPU.flagC = result << 8;
-    CPU.flagV = 0;
+    // Set N/Z/C, clear V (byte)
+    CPU.flagNZ = CPU.flagC  = result << 8;
+    CPU.flagV  = 0;
 }
 
-function setByteNZVC(result, flagV) { // Set all flag conditions (byte)
+function setByteNZVC(result, flagV) {
     "use strict";
-    CPU.flagNZ = CPU.flagC = result << 8;
-    CPU.flagV = flagV << 8;
+    // Set N/Z/C/V (byte)
+    CPU.flagNZ = CPU.flagC  = result << 8;
+    CPU.flagV  = flagV << 8;
 }
 
 
-// trap() handles all the trap/abort functions. It reads the trap vector from kernel
-// D space, changes mode to reflect the new PSW and PC, and then pushes the old PSW and
-// PC onto the new mode stack. trap() returns a -1 which is passed up through function
-// calls to indicate that a trap/abort has occurred (to terminate the current instruction)
-// CPU.trapPSW records the first PSW for double trap handling. The special value of -2
-// allows console operations to propagate an abort without trapping to the new vector.
+// === trap() ===
+// Purpose:
+//   Handle all trap and abort conditions. A trap occurs when the CPU must
+//   transfer control to a predefined vector in kernel D space (e.g. invalid
+//   instruction, odd address, I/O attention).
+//
+// Behavior:
+//   • Reads the trap vector from kernel D space.
+//   • Updates CPU mode and PSW to reflect the new state.
+//   • Pushes the old PSW and PC onto the new mode stack.
+//   • Returns -1 to signal that a trap/abort has occurred, terminating the
+//     current instruction.
+//
+// Special Handling:
+//   • CPU.trapPSW records the first PSW value when a trap is invoked.
+//     – Used to detect double traps.
+//     – Special value -2 allows console operations to propagate an abort
+//       without trapping to a new vector.
+//   • If a double trap is detected in kernel mode, vector is forced to 4
+//     (odd address trap) and CPU.CPU_Error is updated.
+//
+// Side Effects:
+//   • Updates MMR1/MMR2 with trap information if MMR0 is not frozen.
+//   • Forces MMU mode to kernel (mode 0) for vector fetch.
+//   • On double trap, resets stack pointer (R6) to 4 (red zone).
+//   • Sets CPU.displayPhysical and CPU.CPU_Error flags if errorMask is provided.
+//
+// Summary:
+//   trap() centralizes all trap/abort logic, ensuring consistent handling of
+//   PSW, PC, stack, and error flags across the emulator.
+
 
 function trap(vector, errorMask) {
     "use strict";
@@ -415,7 +554,7 @@ function trap(vector, errorMask) {
         }
         //LOG_INSTRUCTION(vector, "-trap-", 0x1ff);
         if (!(CPU.MMR0 & 0xe000)) {
-            CPU.MMR1 = 0xf6f6;
+            CPU.MMR1 = 0xf6f6; // SP modified twice
             CPU.MMR2 = vector;
         }
         setMMUmode(0); // read from kernel D space (mode 0)
@@ -440,88 +579,95 @@ function trap(vector, errorMask) {
     return -1; // signal that a trap has occurred
 }
 
-// Functions to read and write memory by a 22 bit physical address
+// === Physical Memory Access (22-bit addresses) ===
 
-function readWordByPhysical(physicalAddress) {
+// Word access
+function readWordByPhysical(address) {
     "use strict";
-    if (physicalAddress < IOBASE_UNIBUS) {
-        return CPU.memory[physicalAddress >>> 1];
-    } else {
-        return iopage.access(physicalAddress, -1, 0);
-    }
+    return (address < IOBASE_UNIBUS)
+        ? CPU.memory[address >>> 1]
+        : iopage.access(address, -1, 0); // IO read (word)
 }
 
-function writeWordByPhysical(physicalAddress, data) {
+function writeWordByPhysical(address, data) {
     "use strict";
-    if (physicalAddress < IOBASE_UNIBUS) {
-        return (CPU.memory[physicalAddress >>> 1] = data);
-    } else {
-        return iopage.access(physicalAddress, data, 0);
-    }
+    return (address < IOBASE_UNIBUS)
+        ? (CPU.memory[address >>> 1] = data)
+        : iopage.access(address, data, 0); // IO write (word)
 }
 
-function readByteByPhysical(physicalAddress) {
+// Byte access
+function readByteByPhysical(address) {
     "use strict";
-    if (physicalAddress < IOBASE_UNIBUS) {
-        if (physicalAddress & 1) {
-            return (CPU.memory[physicalAddress >>> 1] >>> 8);
+    if (address < IOBASE_UNIBUS) {
+        const index = address >>> 1;
+        // Odd address → high byte, even → low byte
+        return (address & 1)
+            ? (CPU.memory[index] >>> 8)
+            : (CPU.memory[index] & 0xFF);
+    }
+    return iopage.access(address, -1, 1); // IO read (byte)
+}
+
+function writeByteByPhysical(address, data) {
+    "use strict";
+    if (address < IOBASE_UNIBUS) {
+        const index = address >>> 1;
+        if (address & 1) {
+            // Odd address → update high byte
+            return CPU.memory[index] = (data << 8) | (CPU.memory[index] & 0xFF);
         } else {
-            return (CPU.memory[physicalAddress >>> 1] & 0xff);
+            // Even address → update low byte
+            return CPU.memory[index] = (CPU.memory[index] & 0xFF00) | data;
         }
-    } else {
-        return iopage.access(physicalAddress, -1, 1);
     }
+    return iopage.access(address, data, 1); // IO write (byte)
 }
 
-function writeByteByPhysical(physicalAddress, data) {
-    "use strict";
-    if (physicalAddress < IOBASE_UNIBUS) {
-        let memoryIndex = physicalAddress >>> 1;
-        if (physicalAddress & 1) {
-            return (CPU.memory[memoryIndex] = (data << 8) | (CPU.memory[memoryIndex] & 0xff));
-        } else {
-            return (CPU.memory[memoryIndex] = (CPU.memory[memoryIndex] & 0xff00) | data);
-        }
-    } else {
-        return iopage.access(physicalAddress, data, 1);
-    }
-}
+// === mapVirtualToPhysical() ===
+// Purpose:
+//   Convert a 17‑bit virtual address (Instruction/Data space) into a 22‑bit physical address.
+//   This implements the PDP‑11/70 memory management unit (MMU), including traps and aborts.
+//
+// Access Control:
+//   • The MMU can be enabled separately for read and write (diagnostic mode).
+//   • CPU.mmuEnable is compared against the accessMask (MMU_READ / MMU_WRITE).
+//   • If no match → virtual address is treated as a simple 16‑bit physical address.
+//     – Upper page maps into I/O space.
+//     – Odd address checks are performed here.
+//
+// Address Spaces:
+//   • CPU.mmuMode selects which mapping to use:
+//       0 = Kernel, 1 = Supervisor, 2 = Illegal, 3 = User.
+//   • Normally set via writePSW(), but certain instructions (MFPD, MFPI, MTPD, MTPI)
+//     and trap() may override temporarily.
+//
+// PDP‑11/70 Specifics:
+//   • Highest 18‑bit space (017000000 and above) maps directly to Unibus space.
+//   • This reduces maximum memory size but allows software testing of the Unibus map.
+//   • Some OSes misdetect memory size because high addresses wrap back into low memory.
+//
+// Traps & Errors:
+//   • Odd address → Trap 4 (error 0x40).
+//   • Non‑existent memory → Trap 4 (error 0x20).
+//   • Unibus timeout → Trap 4 (error 0x10).
+//   • MMU aborts and traps are logged via MMR0/MMR1/MMR2.
+//   • Trap 250 is used for MMU traps (ADRS ERR light).
+//
+// Page Handling:
+//   • Page number = (virtualAddress >>> 13) | (mmuMode << 4), masked by CPU.mmuPageMask.
+//   • Physical address = (virtual offset + PAR[page] << 6).
+//   • PDR[page] defines access control (read‑only, read‑write, traps).
+//   • Page length checks enforce upward/downward expansion rules.
+//   • A/W bits in PDR are set when pages are accessed or written.
+//
+// Summary:
+//   This routine centralizes all MMU mapping logic, including:
+//   – Virtual → physical translation
+//   – Trap/abort detection
+//   – Page access control and length enforcement
+//   – PDP‑11/70 Unibus quirks
 
-// mapVirtualToPhysical() does memory management by converting a 17 bit I/D virtual
-// address to a 22 bit physical address.
-// A real PDP 11/70 memory management unit can be enabled separately for read and
-// write for diagnostic purposes. This is handled here by having by having an
-// enable mask (CPU.mmuEnable) which is tested against the operation access mask
-// (accessMask). If there is no match then the virtual address is simply mapped
-// as a 16 bit physical address with the upper page going to the IO address space.
-// Access bit mask values are MMU_READ and MMU_WRITE with the lower 4 bits contaning
-// the operand length; used for auto-increment calculation and to indicate byte mode
-// access.
-//
-// As an aside it turns out that it is the memory management unit that does odd address
-// and non-existent memory trapping for main memory: who knew? :-) I thought these would
-// have been handled at access time similar to IO page accesses.
-//
-// When doing mapping CPU.mmuMode selects which address space is to be used:
-// 0 = kernel, 1 = supervisor, 2 = illegal, 3 = user. Normally CPU.mmuMode is
-// set by the writePSW() function but there are exceptions for instructions which
-// move data between address spaces (MFPD, MFPI, MTPD, and MTPI), and function trap().
-// These will modify CPU.mmuMode outside of writePSW() and then restore it again if
-// all worked. If however something happens to cause a trap then no restore is done
-// as writePSW() will have been invoked as part of the trap to resynchronize the
-// value of CPU.mmuMode
-//
-// A PDP 11/70 is different to other PDP 11's in that the highest 18 bit space (017000000
-// & above) map directly to unibus space - including low memory. This doesn't appear to
-// be particularly useful as it restricts maximum system memory size - however it does
-// allow software testing of the unibus map. This feature also appears to confuse some
-// OSes which test consecutive memory locations to find maximum memory - and on a full
-// memory system find themselves accessing low memory again at high addresses.
-//
-// 15 | 14 | 13 | 12 | 11 | 10 | 9 | 8 | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 MMR0
-//nonr leng read trap unus unus ena mnt cmp  -mode- i/d  --page--   enable
-//
-// Map a 17 bit I/D virtual address to a 22 bit physical address
 
 function mapVirtualToPhysical(virtualAddress, accessMask) {
     "use strict";
@@ -537,8 +683,8 @@ function mapVirtualToPhysical(virtualAddress, accessMask) {
             }
         }
     } else { // This access is mapped by the MMU
-        let errorMask = 0
-        let page = ((virtualAddress >>> 13) | 0x30) & CPU.mmuPageMask; // Make address into page number
+        let errorMask = 0;
+		let page = ((virtualAddress >>> 13) | (CPU.mmuMode << 4) ) & CPU.mmuPageMask; // Make address into page number
         let pdr = CPU.mmuPDR[page];
         physicalAddress = ((virtualAddress & 0x1fff) + (CPU.mmuPAR[page] << 6)) & 0x3fffff;
         if (!(CPU.MMR3 & 0x10)) { // 18 bit mapping needs extra trimming
@@ -634,48 +780,95 @@ function mapVirtualToPhysical(virtualAddress, accessMask) {
     return (CPU.displayPhysical = physicalAddress);
 }
 
-function readWordByVirtual(virtualAddress) { // input address is 17 bit (I/D)
+// === Virtual Word Access ===
+// Translate a 17‑bit virtual address (Instruction/Data space) into a 22‑bit physical address.
+// • If mapping fails (trap/abort), a negative value is returned.
+// • Otherwise, the word is read/written via physical memory access.
+
+function readWordByVirtual(virtualAddress) {
     "use strict";
-    let physicalAddress;
-    if ((physicalAddress = mapVirtualToPhysical(virtualAddress, MMU_WORD_READ)) < 0) {
-        return physicalAddress;
-    }
+    // Map virtual → physical with read access
+    const physicalAddress = mapVirtualToPhysical(virtualAddress, MMU_WORD_READ);
+    // Negative return indicates a trap/abort
+    if (physicalAddress < 0) {
+		return physicalAddress;
+	}
+    // Otherwise, fetch word from physical memory
     return readWordByPhysical(physicalAddress);
 }
 
-function writeWordByVirtual(virtualAddress, data) { // input address is 17 bit (I/D)
+function writeWordByVirtual(virtualAddress, data) {
     "use strict";
-    let physicalAddress;
-    if ((physicalAddress = mapVirtualToPhysical(virtualAddress, MMU_WORD_WRITE)) < 0) {
-        return physicalAddress;
-    }
+    // Map virtual → physical with write access
+    const physicalAddress = mapVirtualToPhysical(virtualAddress, MMU_WORD_WRITE);
+
+    // Negative return indicates a trap/abort
+    if (physicalAddress < 0) {
+		return physicalAddress;
+	}
+    // Otherwise, write word to physical memory
     return writeWordByPhysical(physicalAddress, data);
 }
 
-// Stack limit checks only occur for Kernel mode and are either a yellow warning trap
-// after instruction completion, or a red abort which stops the current instruction.
+// === stackCheck() ===
+// Purpose:
+//   Verify stack pointer limits in Kernel mode (mmuMode = 0).
+//   PDP‑11 distinguishes between:
+//     • Red zone: hard overflow → immediate trap/abort, instruction terminated.
+//     • Yellow zone: warning overflow → trap after instruction completes.
+//
+// Behavior:
+//   • Only applies in Kernel mode.
+//   • Mask virtualAddress to 16 bits for stack pointer check.
+//   • If SP is below stackLimit or near top of memory (>= 0xFFFE):
+//       – If SP is far below limit (>= 32 words) or at top of memory:
+//           → Reset SP to 4, trigger Trap 4 (error 0x04, red zone).
+//       – Otherwise:
+//           → Set trapMask bit 4 (yellow zone warning).
+//
+// Return:
+//   • Returns the original virtualAddress if no red zone trap.
+//   • Returns negative trap code if red zone triggered.
 
 function stackCheck(virtualAddress) {
     "use strict";
-    if (!CPU.mmuMode) { // Kernel mode 0 checking only
-        let checkAddress = virtualAddress & 0xffff;
-        if (checkAddress <= CPU.stackLimit || checkAddress >= 0xfffe) {
-            if (checkAddress + 32 <= CPU.stackLimit || checkAddress >= 0xfffe) {
+    if (!CPU.mmuMode) { // Kernel mode only
+        const checkAddress = virtualAddress & 0xFFFF;
+        // Check against stack limit or top of memory
+        if (checkAddress <= CPU.stackLimit || checkAddress >= 0xFFFE) {
+            // Red zone: severe overflow
+            if (checkAddress + 32 <= CPU.stackLimit || checkAddress >= 0xFFFE) {
                 CPU.registerVal[6] = 4; // Reset SP
-                return trap(0o4, 0x04); // Trap 4 - 0x04 Red zone stack limit
+                return trap(0o4, 0x04); // Trap 4 – Red zone stack limit
             }
-            CPU.trapMask |= 4; // Yellow zone stack limit
+            // Yellow zone: warning trap after instruction completes
+            CPU.trapMask |= 4;
         }
     }
     return virtualAddress;
 }
 
+// === Stack Operations ===
+// pushWord(data, skipLimitCheck):
+//   • Decrements SP by 2 (word push).
+//   • Performs stack limit check unless skipLimitCheck is true.
+//   • Writes word to virtual address.
+//   • Returns negative trap code if abort occurs.
+//
+// popWord():
+//   • Reads word at current SP.
+//   • Increments SP by 2 if read succeeds.
+//   • Returns word value or negative trap code if trap occurs.
+
+
 function pushWord(data, skipLimitCheck) {
     "use strict";
     let virtualAddress = (CPU.registerVal[6] = (CPU.registerVal[6] + 0xfffe) & 0xffff) | 0x10000;
+	// Update MMR1 to track register changes if MMR0 not frozen
     if (!(CPU.MMR0 & 0xe000)) {
         CPU.MMR1 = (CPU.MMR1 << 8) | 0xf6;
     }
+	// Perform stack limit check unless explicitly skipped
     if (!skipLimitCheck) {
         if ((virtualAddress = stackCheck(virtualAddress)) < 0) {
             return virtualAddress;
@@ -686,55 +879,60 @@ function pushWord(data, skipLimitCheck) {
 
 function popWord() {
     "use strict";
-    let data;
-    if ((data = readWordByVirtual(CPU.registerVal[6] | 0x10000)) >= 0) {
-        CPU.registerVal[6] = (CPU.registerVal[6] + 2) & 0xffff;
+	// Read word at current SP (Data space)
+    let data = readWordByVirtual(CPU.registerVal[6] | 0x10000);
+    // If read succeeded, increment SP by 2
+    if (data >= 0) {
+        CPU.registerVal[6] = (CPU.registerVal[6] + 2) & 0xFFFF;
     }
     return data;
 }
 
+// === getVirtualByMode() ===
+// Purpose:
+//   Convert a 6‑bit instruction operand (3 bits mode + 3 bits register)
+//   into a 17‑bit virtual address (Instruction/Data space).
+//
+// Operand Encoding:
+//   • The 17th bit marks Instruction (I) vs Data (D) space.
+//   • Register 7 (PC) references Instruction space; all others reference Data space.
+//
+// Addressing Modes (octal):
+//   0: R        → Illegal (no virtual address, trap)
+//   1: (R)      → Direct register reference (I if R=7, else D)
+//   2: (R)+     → Autoincrement (I if R=7, else D)
+//   3: @(R)+    → Indirect autoincrement (address from I/D, operand from D)
+//   4: -(R)     → Autodecrement (I if R=7, else D)
+//   5: @-(R)    → Indirect autodecrement (address from I/D, operand from D)
+//   6: x(R)     → Displacement (x from I, operand from D)
+//   7: @x(R)    → Indirect displacement (x from I, address+operand from D)
+//
+// Stack Limit Checks:
+//   • Kernel mode stack checks apply for modes 1, 2, 4, and 6.
+//   • SP is never incremented/decremented by odd (byte) amounts.
+//   • Immediate mode (PC)+ always increments by 2 regardless of operand length.
+//
+// Access Mode:
+//   • accessMode encodes both access type and operand length.
+//     – Flags: MMU_READ, MMU_WRITE
+//     – Length: low 4 bits (1=byte, 2=word, 4/8=FPP double/quad word)
+//   • Length is required for autoincrement/decrement calculations.
+//   • MMU flags are only needed if actual operand access occurs.
+//
+// Side Effects:
+//   • CPU.MMR1 updated to track register increments/decrements.
+//     – Allows OS to back out changes if a page fault occurs.
+//   • PC increments by 2 when fetching displacement/immediate values.
+//   • Trap() invoked for illegal modes or stack limit violations.
+//
+// Return:
+//   • A 17‑bit virtual address (with I/D bit set).
+//   • Negative value if a trap/abort occurred.
 
-// getVirtualByMode() maps a six bit instruction operand to a 17 bit I/D virtual
-// address space. Instruction operands are six bits in length - three bits for the
-// mode and three for the register. The 17th I/D bit in the resulting virtual
-// address represents whether the reference is to Instruction space or Data space,
-// which depends on the combination of the operand mode and whether the register is
-// the Program Counter (register 7).
-//
-// The eight instruction addressing modes are:-
-//      0   R           no valid virtual address (error)
-//      1   (R)         operand from I/D depending if R = 7
-//      2   (R)+        operand from I/D depending if R = 7
-//      3   @(R)+       address from I/D depending if R = 7 and operand is from D space
-//      4   -(R)        operand from I/D depending if R = 7
-//      5   @-(R)       address from I/D depending if R = 7 and operand is from D space
-//      6   x(R)        x from I space but operand from D space
-//      7   @x(R)       x from I space but address and operand from D space
-//
-// Kernel mode stack limit checks are implemented for addressing modes 1, 2, 4 & 6 (!)
-// (the other modes can't write relative to SP!)
-//
-// The accessMode field specifies two bit flags for read or write, or both for a modify.
-// Mask values for these are constants MMU_READ and MMU_WRITE which are used by the MMU
-// to indicate the data access type (determines whether page access is allowed, whether to
-// mark the page as modified, etc).
-// In addition the lower four bits specify the operand length. This is 1 for a byte
-// or 2 for a word - however the FPP processor may also use lengths of 4 or 8. Thus if
-// autoincrement is used for an FPP double word the register will autoincrement by 8.
-// The length component is always required here for autoincrement/decrement, but the
-// MMU_READ and MMU_WRITE flags are not required if no operand access is intended
-// (eg getting the destination address for a JSR instruction jump or locating the virtual
-// address of a FPP operand).
-//
-// Just to keep us on our toes the mode (PC)+ (immediate mode, octal 27) ALWAYS increments
-// by 2 no matter what type of operand is used, and SP is never incremented or decremented
-// by odd (byte) amounts.
-//
-// Also CPU.MMR1 must be updated to track which registers have been incremented and
-// decremented. This allows software to backout any changes and restart an instruction
-// when a page fault occurs.
-//
-// Convert a six bit instruction operand to a 17 bit I/D virtual address
+// === Constants for readability ===
+const WORD_DECREMENT   = 0xFFFE;   // -2 in 16-bit wraparound
+const DATA_SPACE_BIT   = 0x10000;  // I/D space selector (bit 16)
+const WORD_MASK        = 0xFFFF;   // 16-bit mask
 
 function getVirtualByMode(addressMode, accessMode) {
     "use strict";
@@ -745,9 +943,10 @@ function getVirtualByMode(addressMode, accessMode) {
         case 1: // Mode 1: (R)
             switch (reg) {
                 case 6: // (SP)
-                    virtualAddress = CPU.registerVal[reg] | 0x10000; // D space
+                    virtualAddress = CPU.registerVal[reg] | DATA_SPACE_BIT; // D space
                     if (accessMode & MMU_WRITE) {
-                        if ((virtualAddress = stackCheck(virtualAddress)) < 0) {
+                        virtualAddress = stackCheck(virtualAddress);
+                        if (virtualAddress < 0) {
                             return virtualAddress;
                         }
                     }
@@ -756,16 +955,17 @@ function getVirtualByMode(addressMode, accessMode) {
                     virtualAddress = CPU.registerVal[reg]; // I space
                     break;
                 default: // (Rx)
-                    virtualAddress = CPU.registerVal[reg] | 0x10000; // D space
+                    virtualAddress = CPU.registerVal[reg] | DATA_SPACE_BIT; // D space
             }
-            return virtualAddress; // (R)  can be either space
+            return virtualAddress;
         case 2: // Mode 2: (R)+ including immediate operand #x
             switch (reg) {
-                case 6: // (SP)+}
+                case 6: // (SP)+
                     autoIncrement = (accessMode + 1) & MMU_LENGTH_EVEN;
-                    virtualAddress = CPU.registerVal[reg] | 0x10000; // D space
+                    virtualAddress = CPU.registerVal[reg] | DATA_SPACE_BIT; // D space
                     if (accessMode & MMU_WRITE) {
-                        if ((virtualAddress = stackCheck(virtualAddress)) < 0) {
+                        virtualAddress = stackCheck(virtualAddress);
+                        if (virtualAddress < 0) {
                             return virtualAddress;
                         }
                     }
@@ -774,74 +974,78 @@ function getVirtualByMode(addressMode, accessMode) {
                     autoIncrement = 2;
                     virtualAddress = CPU.registerVal[reg]; // I space
                     break;
-                default: // (Rx)+space
+                default: // (Rx)+
                     autoIncrement = accessMode & MMU_LENGTH_MASK;
-                    virtualAddress = CPU.registerVal[reg] | 0x10000; // D space
+                    virtualAddress = CPU.registerVal[reg] | DATA_SPACE_BIT; // D space
             }
-            break; // (R)+  can be either space
+            break;
         case 3: // Mode 3: @(R)+
-            if ((virtualAddress = readWordByVirtual(reg === 7 ? CPU.registerVal[7] : CPU.registerVal[reg] | 0x10000)) < 0) {
+            virtualAddress = readWordByVirtual(
+                reg === 7 ? CPU.registerVal[7] : (CPU.registerVal[reg] | DATA_SPACE_BIT)
+            );
+            if (virtualAddress < 0) {
                 return virtualAddress;
             }
-            //if (reg === 7) {
-            //    LOG_OPERAND(virtualAddress);
-            //}
             autoIncrement = 2;
-            virtualAddress |= 0x10000; // D space
-            break; // @(R)+  D space
+            virtualAddress |= DATA_SPACE_BIT; // D space
+            break;
         case 4: // Mode 4: -(R)
             switch (reg) {
                 case 6: // -(SP)
                     autoIncrement = 0x10000 - ((accessMode + 1) & MMU_LENGTH_EVEN);
-                    virtualAddress = (CPU.registerVal[6] + autoIncrement) | 0x10000; // D space
+                    virtualAddress = (CPU.registerVal[6] + autoIncrement) | DATA_SPACE_BIT; // D space
                     if (accessMode & MMU_WRITE) {
-                        if ((virtualAddress = stackCheck(virtualAddress)) < 0) {
+                        virtualAddress = stackCheck(virtualAddress);
+                        if (virtualAddress < 0) {
                             return virtualAddress;
                         }
                     }
                     break;
-                case 7: // -(PC)  How would you use that?
-                    autoIncrement = 0xfffe; // -2
-                    virtualAddress = (CPU.registerVal[7] + autoIncrement) & 0xffff; // I space
+                case 7: // -(PC)
+                    autoIncrement = WORD_DECREMENT;
+                    virtualAddress = (CPU.registerVal[7] + autoIncrement) & WORD_MASK; // I space
                     break;
                 default: // -(Rx)
                     autoIncrement = 0x10000 - (accessMode & MMU_LENGTH_MASK);
-                    virtualAddress = (CPU.registerVal[reg] + autoIncrement) | 0x10000; // D space
+                    virtualAddress = (CPU.registerVal[reg] + autoIncrement) | DATA_SPACE_BIT; // D space
             }
-            break; // -(R)  can be either space
+            break;
         case 5: // Mode 5: @-(R)
-            autoIncrement = 0xfffe; // -2
-            virtualAddress = (CPU.registerVal[reg] + autoIncrement) | 0x10000; // D space
-            if ((virtualAddress = readWordByVirtual(reg === 7 ? virtualAddress & 0xffff : virtualAddress)) < 0) {
+            autoIncrement = WORD_DECREMENT;
+            virtualAddress = (CPU.registerVal[reg] + autoIncrement) | DATA_SPACE_BIT; // D space
+            virtualAddress = readWordByVirtual(reg === 7 ? (virtualAddress & WORD_MASK) : virtualAddress);
+            if (virtualAddress < 0) {
                 return virtualAddress;
             }
-            virtualAddress |= 0x10000; // D space
-            break; // @-(R)  D space
+            virtualAddress |= DATA_SPACE_BIT; // D space
+            break;
         case 6: // Mode 6: d(R)
-            if ((virtualAddress = readWordByVirtual(CPU.registerVal[7])) < 0) { // I space
+            virtualAddress = readWordByVirtual(CPU.registerVal[7]); // I space
+            if (virtualAddress < 0) {
                 return virtualAddress;
             }
-            //LOG_OPERAND(virtualAddress);
-            CPU.registerVal[7] = (CPU.registerVal[7] + 2) & 0xffff;
-            virtualAddress = (CPU.registerVal[reg] + virtualAddress) | 0x10000; // D space
+            CPU.registerVal[7] = (CPU.registerVal[7] + 2) & WORD_MASK;
+            virtualAddress = (CPU.registerVal[reg] + virtualAddress) | DATA_SPACE_BIT; // D space
             if (reg === 6 && (accessMode & MMU_WRITE)) {
-                if ((virtualAddress = stackCheck(virtualAddress)) < 0) {
+                virtualAddress = stackCheck(virtualAddress);
+                if (virtualAddress < 0) {
                     return virtualAddress;
                 }
             }
-            return virtualAddress; // d(R)  D space
+            return virtualAddress;
         case 7: // Mode 7: @d(R)
-            if ((virtualAddress = readWordByVirtual(CPU.registerVal[7])) < 0) { // I space
+            virtualAddress = readWordByVirtual(CPU.registerVal[7]); // I space
+            if (virtualAddress < 0) {
                 return virtualAddress;
             }
-            //LOG_OPERAND(virtualAddress);
-            CPU.registerVal[7] = (CPU.registerVal[7] + 2) & 0xffff;
-            if ((virtualAddress = readWordByVirtual((CPU.registerVal[reg] + virtualAddress) | 0x10000)) < 0) {
+            CPU.registerVal[7] = (CPU.registerVal[7] + 2) & WORD_MASK;
+            virtualAddress = readWordByVirtual((CPU.registerVal[reg] + virtualAddress) | DATA_SPACE_BIT);
+            if (virtualAddress < 0) {
                 return virtualAddress;
             }
-            return virtualAddress | 0x10000; // @d(R)  D space
+            return virtualAddress | DATA_SPACE_BIT; // @d(R) D space
     }
-    CPU.registerVal[reg] = (CPU.registerVal[reg] + autoIncrement) & 0xffff;
+    CPU.registerVal[reg] = (CPU.registerVal[reg] + autoIncrement) & WORD_MASK;
     if (!(CPU.MMR0 & 0xe000)) {
         CPU.MMR1 = (((CPU.MMR1 << 5) | (autoIncrement & 0x1f)) << 3) | reg;
     }
@@ -849,194 +1053,267 @@ function getVirtualByMode(addressMode, accessMode) {
 }
 
 
-// Convert an instruction operand into a 17 bit I/D virtual address and then into a
-// 22 bit physical address.
-// Note: attempting to get the physical address of a register is an error!
+// === mapPhysicalByMode() ===
+// Purpose:
+//   Convert a 6‑bit instruction operand (mode + register) into a 17‑bit virtual
+//   address, then translate that into a 22‑bit physical address.
+//
+// Behavior:
+//   • Calls getVirtualByMode() to decode the operand into a virtual address.
+//   • If getVirtualByMode() returns < 0 → a trap/abort occurred, propagate that value.
+//   • Otherwise, pass the virtual address to mapVirtualToPhysical() for MMU translation.
+//
+// Notes:
+//   • Attempting to obtain a physical address for a register operand is illegal
+//     and will trigger a trap in getVirtualByMode().
+//   • accessMode encodes both access type (MMU_READ/MMU_WRITE) and operand length.
+//
+// Return:
+//   • 22‑bit physical address if successful.
+//   • Negative trap code if an error/abort occurred.
 
 function mapPhysicalByMode(addressMode, accessMode) {
     "use strict";
-    let virtualAddress;
-    if ((virtualAddress = getVirtualByMode(addressMode, accessMode)) < 0) {
-        return virtualAddress;
-    }
+    // Decode operand → virtual address
+    const virtualAddress = getVirtualByMode(addressMode, accessMode);
+    // Trap/abort: propagate negative return
+    if (virtualAddress < 0) {
+		return virtualAddress;
+	}
+    // Translate virtual → physical
     return mapVirtualToPhysical(virtualAddress, accessMode);
 }
 
+// === Operand Access Helpers (by addressing mode) ===
+//
+// Purpose:
+//   These functions abstract the details of fetching or storing operands
+//   based on the 6‑bit instruction addressing mode field. They handle both
+//   register and memory references, including MMU translation and trap checks.
+//
+// Functions:
+//   • readWordByMode(mode)      → Fetch a word operand.
+//   • writeWordByMode(mode,val) → Store a word operand.
+//   • modifyWordByMode(mode)    → Fetch a word operand for read‑modify‑write.
+//   • modifyWord(val)           → Complete the write‑back for modify cycle.
+//   • readByteByMode(mode)      → Fetch a byte operand.
+//   • writeByteByMode(mode,val) → Store a byte operand.
+//   • modifyByteByMode(mode)    → Fetch a byte operand for read‑modify‑write.
+//   • modifyByte(val)           → Complete the write‑back for modify cycle.
+//
+// Behavior:
+//   • If mode specifies a register (addressMode & 0o70 == 0):
+//       – Operands are taken directly from CPU.registerVal.
+//   • Otherwise:
+//       – mapPhysicalByMode() is used to translate the operand into a physical address.
+//       – read/write functions then access memory via physical address helpers.
+//   • modify* functions remember the last register or physical address accessed,
+//     so the second call can update the same location.
+//
+// Error Handling:
+//   • Any negative return value indicates a trap/abort (e.g. illegal mode,
+//     non‑existent memory, odd address).
+//   • Instruction execution should terminate immediately if a trap is returned.
+//
+// Notes:
+//   • These helpers centralize operand access logic, so instruction routines
+//     don’t need to duplicate MMU, trap, or register handling.
+//   • Byte vs word access is fully supported, with correct masking and sign extension.
+//   • Read‑modify‑write cycles are split into two calls to allow computation
+//     between fetch and store.
+
 function readWordByMode(addressMode) {
     "use strict";
-    if (!(addressMode & 0o70)) { // If register mode just get register value
+    if (!(addressMode & 0o70)) { // Register mode → direct value
         return CPU.registerVal[addressMode & 7];
     } else {
-        let physicalAddress;
-        if ((physicalAddress = mapPhysicalByMode(addressMode, MMU_WORD_READ)) < 0) {
-            return physicalAddress;
-        }
+        const physicalAddress = mapPhysicalByMode(addressMode, MMU_WORD_READ);
+        if (physicalAddress < 0) {
+			return physicalAddress;
+		}
         return readWordByPhysical(physicalAddress);
-        //if ((addressMode & 0o77) == 0o27) {
-        //    LOG_OPERAND(data);
-        //}
+        //if ((addressMode & 0o77) == 0o27) { LOG_OPERAND(data); }
     }
 }
 
 function writeWordByMode(addressMode, data) {
     "use strict";
-    if (!(addressMode & 0o70)) { // If register mode write to the register
-        return (CPU.registerVal[addressMode & 7] = data & 0xffff);
+    if (!(addressMode & 0o70)) { // Register mode → direct write
+        CPU.registerVal[addressMode & 7] = data & 0xFFFF;
+        return CPU.registerVal[addressMode & 7];
     } else {
-        let physicalAddress;
-        if ((physicalAddress = mapPhysicalByMode(addressMode, MMU_WORD_WRITE)) < 0) {
-            return physicalAddress;
-        }
-        return writeWordByPhysical(physicalAddress, data & 0xffff);
+        const physicalAddress = mapPhysicalByMode(addressMode, MMU_WORD_WRITE);
+        if (physicalAddress < 0) {
+			return physicalAddress;
+		}
+        return writeWordByPhysical(physicalAddress, data & 0xFFFF);
     }
 }
 
 function modifyWordByMode(addressMode) {
     "use strict";
-    if (!(addressMode & 0o70)) { // If register mode get register value and remember which register
-        return CPU.registerVal[CPU.modifyRegister = addressMode & 7];
+    if (!(addressMode & 0o70)) { // Register mode → remember register
+        CPU.modifyRegister = addressMode & 7;
+        return CPU.registerVal[CPU.modifyRegister];
     } else {
-        let physicalAddress;
-        if ((physicalAddress = mapPhysicalByMode(addressMode, MMU_WORD_MODIFY)) < 0) {
-            return physicalAddress;
-        }
-        CPU.modifyRegister = -1; // Remember that a physical address was used
-        return readWordByPhysical(CPU.modifyAddress = physicalAddress);
+        const physicalAddress = mapPhysicalByMode(addressMode, MMU_WORD_MODIFY);
+        if (physicalAddress < 0) {
+			return physicalAddress;
+		}
+        CPU.modifyRegister = -1;              // Mark physical access
+        CPU.modifyAddress = physicalAddress;  // Remember address
+        return readWordByPhysical(physicalAddress);
     }
 }
 
 function modifyWord(data) {
     "use strict";
-    if (CPU.modifyRegister >= 0) { // Modify the last register or memory address accessed
-        return (CPU.registerVal[CPU.modifyRegister] = data & 0xffff);
-    } else {
-        return writeWordByPhysical(CPU.modifyAddress, data & 0xffff);
+    if (CPU.modifyRegister >= 0) { // Register modify
+        CPU.registerVal[CPU.modifyRegister] = data & 0xFFFF;
+        return CPU.registerVal[CPU.modifyRegister];
+    } else { // Physical modify
+        return writeWordByPhysical(CPU.modifyAddress, data & 0xFFFF);
     }
 }
 
 function readByteByMode(addressMode) {
     "use strict";
-    if (!(addressMode & 0o70)) { // If register mode just get register value
-        return (CPU.registerVal[addressMode & 7] & 0xff);
+    if (!(addressMode & 0o70)) { // Register mode → direct value
+        return CPU.registerVal[addressMode & 7] & 0xFF;
     } else {
-        let physicalAddress;
-        if ((physicalAddress = mapPhysicalByMode(addressMode, MMU_BYTE_READ)) < 0) {
-            return physicalAddress;
-        }
+        const physicalAddress = mapPhysicalByMode(addressMode, MMU_BYTE_READ);
+        if (physicalAddress < 0) {
+			return physicalAddress;
+		}
         return readByteByPhysical(physicalAddress);
-        //if ((addressMode & 0o77) == 0o27) {
-        //    LOG_OPERAND(data);
-        //}
+        //if ((addressMode & 0o77) == 0o27) { LOG_OPERAND(data); }
     }
 }
 
 function writeByteByMode(addressMode, data) {
     "use strict";
-    if (!(addressMode & 0o70)) { // If register mode write to the register
-        return (CPU.registerVal[addressMode & 7] = (CPU.registerVal[addressMode & 7] & 0xff00) | (data & 0xff));
+    if (!(addressMode & 0o70)) { // Register mode → direct write
+        const reg = addressMode & 7;
+        CPU.registerVal[reg] = (CPU.registerVal[reg] & 0xFF00) | (data & 0xFF);
+        return CPU.registerVal[reg];
     } else {
-        let physicalAddress;
-        if ((physicalAddress = mapPhysicalByMode(addressMode, MMU_BYTE_WRITE)) < 0) {
-            return physicalAddress;
-        }
-        return writeByteByPhysical(physicalAddress, data & 0xff);
+        const physicalAddress = mapPhysicalByMode(addressMode, MMU_BYTE_WRITE);
+        if (physicalAddress < 0) {
+			return physicalAddress;
+		}
+        return writeByteByPhysical(physicalAddress, data & 0xFF);
     }
 }
 
 function modifyByteByMode(addressMode) {
     "use strict";
-    if (!(addressMode & 0o70)) { // If register mode get register value and remember which register
-        return (CPU.registerVal[CPU.modifyRegister = addressMode & 7] & 0xff);
+    if (!(addressMode & 0o70)) { // Register mode → remember register
+        CPU.modifyRegister = addressMode & 7;
+        return CPU.registerVal[CPU.modifyRegister] & 0xFF;
     } else {
-        let physicalAddress;
-        if ((physicalAddress = mapPhysicalByMode(addressMode, MMU_BYTE_MODIFY)) < 0) {
-            return physicalAddress;
-        }
-        CPU.modifyRegister = -1; // Remember that a physical address was used
-        return readByteByPhysical(CPU.modifyAddress = physicalAddress);
+        const physicalAddress = mapPhysicalByMode(addressMode, MMU_BYTE_MODIFY);
+        if (physicalAddress < 0) {
+			return physicalAddress;
+		}
+        CPU.modifyRegister = -1;              // Mark physical access
+        CPU.modifyAddress = physicalAddress;  // Remember address
+        return readByteByPhysical(physicalAddress);
     }
 }
 
 function modifyByte(data) {
     "use strict";
-    if (CPU.modifyRegister >= 0) { // Modify the last register or memory address accessed
-        return (CPU.registerVal[CPU.modifyRegister] = (CPU.registerVal[CPU.modifyRegister] & 0xff00) | (data & 0xff));
-    } else {
-        return writeByteByPhysical(CPU.modifyAddress, data & 0xff);
+    if (CPU.modifyRegister >= 0) { // Register modify
+        CPU.registerVal[CPU.modifyRegister] =
+            (CPU.registerVal[CPU.modifyRegister] & 0xFF00) | (data & 0xFF);
+        return CPU.registerVal[CPU.modifyRegister];
+    } else { // Physical modify
+        return writeByteByPhysical(CPU.modifyAddress, data & 0xFF);
     }
 }
 
+// === branch() ===
+// Purpose:
+//   Apply an 8‑bit signed branch offset to the Program Counter (PC = R7).
+//
+// Behavior:
+//   • The offset is taken from the low 8 bits of the instruction.
+//   • If bit 7 (0x80) is set, the offset is sign‑extended (negative branch).
+//   • Offset is multiplied by 2 (word addressing).
+//   • Result is added to the current PC and masked to 16 bits.
 
-
-// Most instruction read operations use a 6 bit instruction operand via
-// a ByMode function such as readWordByMode(). A negative function
-// return indicates that something has failed and a trap or abort has
-// been invoked. The coding template would be:
-//
-//   if ((src = readWordByMode(instruction >>> 6)) >= 0) {
-//         success - use the src value
-//
-// Likewise write operations use function writeWordByMode() to write a
-// result to a register or memory and return a negative value if a failure
-// occurs (non-existant memory, page fault, non-existant device, etc).
-// In this case further instrucion processing should be aborted. The
-// coding template is:
-//
-//    if (writeWordByMode(instruction, data) >= 0) {
-//         continue the instruction
-//
-// For each Word function there are generally corresponding Byte functions,
-// eg readByteByMode() - however there are no byte functions for accessing
-// bytes by virtual address as they are not required.
-//
-// Read/Write operations require two functions to retrieve and then update
-// the value. The first function requests memory mapping with modify access,
-// stores the register number or physical address for the second function, then
-// returns the operand. The second function simply writes the updated value
-// back to the remembered location. If either function returns a negative
-// value then an error condition has been encountered. The coding template
-// is:
-//
-//    if ((dst = modifyByteByMode(instruction)) >= 0) {
-//          result = some computation on dst
-//          if (modifyByte(result) >= 0) {
-//               continue processing
-//
-// Some instructions (eg JMP, JSR, MTPx..) require the address of an operand.
-// The code for this would generally look like:
-//
-//   if ((virtualAddress = getVirtualByMode(instruction, MMU_WORD)) >= 0) {
-//        do something with the address
-//
-// Note that in this case there is an access mode to specify the operand length
-// (required for auto incremenet/decrement) but not an access type (MMU_READ or
-// MMU_WRITE) as the mapping does not attempt to access the operand.
-//
-// CPU condition code flags are stored outside of the PSW for performance reasons. A
-// call to readPSW() will assemble them back into the PSW. Writes to the PSW should
-// generally be through writePSW() as it needs to track which register set is in use,
-// the memory management mode, whether priority has changed etc.
-// Setting and testing of condition code flags is done through function calls such
-// as setNZVC() and testC() so that the implementation detail is abstracted away
-// from the following instruction code (allowing alternate implementation approaches).
-// Normally CPU.mmuMode mirrors the current processor mode held in bits
-// 14 & 15 of the PSW as it is frequently used by memory management operations.
-//
-// All traps and aborts go through the trap() function. It returns a -1 value which
-// is then passed up through other function layers and interpreted as an indicator
-// that something has gone wrong, and that no futher processing is to be done for the
-// current instruction.
-//
-// Instruction execution is performed by the pdp11Processor() function which processes
-// instructions in batches. Javascript requires that control be relinquished periodically
-// to allow other functions such as screen updates, timers, etc to operate.
-
-
-// branch() calculates the branch to PC from a branch instruction offset
 function branch(instruction) {
     "use strict";
     CPU.registerVal[7] = (CPU.registerVal[7] + ((instruction & 0x80 ? instruction | 0xff00 : instruction & 0xff) << 1)) & 0xffff;
 }
+
+// === Operand Access Patterns ===
+//
+// Purpose:
+//   Explain how instruction operands are accessed via ByMode helpers,
+//   how traps/aborts are signaled, and how condition codes are managed.
+//
+// --- Read Operations ---
+// • Use readWordByMode() or readByteByMode().
+// • Return value >= 0 → operand fetched successfully.
+// • Return value < 0 → trap/abort occurred, instruction must terminate.
+//
+// Example:
+//   const src = readWordByMode(instruction >>> 6);
+//   if (src >= 0) {
+//       // use src
+//   }
+//
+// --- Write Operations ---
+// • Use writeWordByMode() or writeByteByMode().
+// • Return value >= 0 → write succeeded.
+// • Return value < 0 → failure (non‑existent memory, page fault, device error).
+//
+// Example:
+//   if (writeWordByMode(instruction, data) >= 0) {
+//       // continue instruction
+//   }
+//
+// --- Read‑Modify‑Write Cycle ---
+// • Two‑step process: fetch with modify*ByMode(), then update with modify*().
+// • First call remembers register/physical address.
+// • Second call writes back the updated value.
+// • Any negative return → trap/abort.
+//
+// Example:
+//   const dst = modifyByteByMode(instruction);
+//   if (dst >= 0) {
+//       const result = someComputation(dst);
+//       if (modifyByte(result) >= 0) {
+//           // continue processing
+//       }
+//   }
+//
+// --- Address‑Only Instructions ---
+// • Some instructions (JMP, JSR, MTPx) require the operand address, not the value.
+// • Use getVirtualByMode() with operand length specified.
+// • No MMU_READ/MMU_WRITE flags needed.
+//
+// Example:
+//   const vAddr = getVirtualByMode(instruction, MMU_WORD);
+//   if (vAddr >= 0) {
+//       // use address
+//   }
+//
+// --- Condition Codes ---
+// • Flags (N, Z, V, C) stored outside PSW for performance.
+// • Use readPSW() to reassemble into PSW.
+// • Always update PSW via writePSW() to track register set, mode, priority.
+// • Helpers like setNZVC() and testC() abstract flag logic.
+//
+// --- Traps & Aborts ---
+// • All traps go through trap().
+// • trap() returns -1, propagated upward to terminate current instruction.
+//
+// --- Instruction Execution ---
+// • pdp11Processor() executes instructions in batches.
+// • JavaScript requires periodic yielding to allow timers, screen updates, etc.
+
 
 function pdp11Processor() {
     "use strict";
@@ -2094,10 +2371,10 @@ function updateLights() {
                     displayLights = CPU.displayMicroAdrs; // Dummy micro address fpp/cpu display
                     break;
                 case 2:
-                    displayLights = CPU.displayBusReg; // Dummy bus register display
+                    displayLights = CPU.displayRegister; // Set by software write to @#17777570
                     break;
                 case 3:
-                    displayLights = CPU.displayRegister; // Set by software write to @#17777570
+                    displayLights = CPU.displayBusReg; // Dummy bus register display
                     break;
             }
             // rotary1 rotary0 PAR PE AE Rn Pa Ma Us Su Ke Da 16 18 22
